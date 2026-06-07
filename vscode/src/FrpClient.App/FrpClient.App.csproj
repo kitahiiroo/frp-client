@@ -1,0 +1,32 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <ApplicationIcon>Assets\frpclient.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Remove="Assets\frpclient.ico" />
+    <Resource Include="Assets\frpclient.ico" />
+    <None Include="..\..\..\frp_0.62.1_windows_amd64\frpc.exe"
+          Link="frp\frpc.exe"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          ExcludeFromSingleFile="true" />
+    <None Include="..\..\..\frp_0.62.1_windows_amd64\frpc.toml"
+          Link="frp\frpc.toml"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          ExcludeFromSingleFile="true" />
+    <None Include="..\..\..\frp_0.62.1_windows_amd64\LICENSE"
+          Link="frp\LICENSE"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          ExcludeFromSingleFile="true" />
+  </ItemGroup>
+
+</Project>

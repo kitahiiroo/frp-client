@@ -1,0 +1,220 @@
+﻿<UserControl x:Class="FrpClient.App.Views.ConfigurationView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d">
+    <Grid Margin="0,12,0,0">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="1.05*" />
+                <ColumnDefinition Width="0.95*" />
+            </Grid.ColumnDefinitions>
+
+            <Border Style="{StaticResource PanelCard}"
+                    Margin="0,0,7,0">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Text="服务器配置"
+                               Style="{StaticResource SectionTitle}"
+                               Margin="0,0,0,14" />
+
+                    <Grid Grid.Row="1"
+                          VerticalAlignment="Stretch">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="150" />
+                            </Grid.ColumnDefinitions>
+
+                            <StackPanel Margin="0,0,12,0"
+                                        VerticalAlignment="Center">
+                                <TextBlock Text="服务器 IP"
+                                           Style="{StaticResource MutedText}"
+                                           Margin="0,0,0,6" />
+                                <TextBox Name="ServerAddrTextBox" />
+                            </StackPanel>
+
+                            <StackPanel Grid.Column="1"
+                                        VerticalAlignment="Center">
+                                <TextBlock Text="服务器端口"
+                                           Style="{StaticResource MutedText}"
+                                           Margin="0,0,0,6" />
+                                <TextBox Name="ServerPortTextBox" />
+                            </StackPanel>
+                        </Grid>
+
+                        <StackPanel Grid.Row="1"
+                                    Margin="0,10,0,0"
+                                    VerticalAlignment="Center">
+                            <TextBlock Text="权限 token"
+                                       Style="{StaticResource MutedText}"
+                                       Margin="0,0,0,6" />
+                            <TextBox Name="AuthTokenTextBox" />
+                        </StackPanel>
+                    </Grid>
+                </Grid>
+            </Border>
+
+            <Border Grid.Column="1"
+                    Style="{StaticResource PanelCard}"
+                    Margin="7,0,0,0">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Text="新增转发规则"
+                                   Style="{StaticResource SectionTitle}"
+                                   VerticalAlignment="Center" />
+
+                        <Button Grid.Column="1"
+                                Width="104"
+                                Content="添加转发"
+                                Background="{StaticResource SuccessBrush}"
+                                BorderBrush="{StaticResource SuccessBrush}"
+                                Foreground="#FFFFFF"
+                                Click="AddProxyButton_Click" />
+                    </Grid>
+
+                    <Grid Grid.Row="1"
+                          Margin="0,14,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="104" />
+                            <ColumnDefinition Width="1.1*" />
+                        </Grid.ColumnDefinitions>
+
+                        <StackPanel Margin="0,0,12,0">
+                            <TextBlock Text="名称"
+                                       Style="{StaticResource MutedText}"
+                                       Margin="0,0,0,6" />
+                            <TextBox Name="ProxyNameTextBox" />
+                        </StackPanel>
+
+                        <StackPanel Grid.Column="1"
+                                    Margin="0,0,12,0">
+                            <TextBlock Text="协议"
+                                       Style="{StaticResource MutedText}"
+                                       Margin="0,0,0,6" />
+                            <ComboBox Name="ProxyTypeComboBox"
+                                      SelectedIndex="0">
+                                <ComboBoxItem Content="tcp" />
+                                <ComboBoxItem Content="udp" />
+                            </ComboBox>
+                        </StackPanel>
+
+                        <StackPanel Grid.Column="2">
+                            <TextBlock Text="本地 IP"
+                                       Style="{StaticResource MutedText}"
+                                       Margin="0,0,0,6" />
+                            <TextBox Name="LocalIpTextBox"
+                                     Text="127.0.0.1" />
+                        </StackPanel>
+                    </Grid>
+
+                    <Grid Grid.Row="2"
+                          Margin="0,10,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <StackPanel Margin="0,0,12,0">
+                            <TextBlock Text="本地端口"
+                                       Style="{StaticResource MutedText}"
+                                       Margin="0,0,0,6" />
+                            <TextBox Name="LocalPortTextBox" />
+                        </StackPanel>
+
+                        <StackPanel Grid.Column="1">
+                            <TextBlock Text="服务器端口"
+                                       Style="{StaticResource MutedText}"
+                                       Margin="0,0,0,6" />
+                            <TextBox Name="RemotePortTextBox" />
+                        </StackPanel>
+                    </Grid>
+                </Grid>
+            </Border>
+        </Grid>
+
+        <Border Grid.Row="1"
+                Style="{StaticResource PanelCard}"
+                Margin="0,14,0,0">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <Grid Margin="0,0,0,12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <TextBlock Text="已有转发规则"
+                               Style="{StaticResource SectionTitle}"
+                               VerticalAlignment="Center" />
+                    <Button Grid.Column="1"
+                            Width="108"
+                            Margin="0,0,8,0"
+                            Content="删除选中"
+                            Foreground="{StaticResource DangerBrush}"
+                            Click="DeleteSelectedButton_Click" />
+                    <Button Grid.Column="2"
+                            Width="108"
+                            Content="保存配置"
+                            Background="{StaticResource PrimaryBrush}"
+                            BorderBrush="{StaticResource PrimaryBrush}"
+                            Foreground="#FFFFFF"
+                            Click="SaveConfigButton_Click" />
+                </Grid>
+
+                <Border Grid.Row="1"
+                        BorderBrush="{StaticResource BorderBrushSoft}"
+                        BorderThickness="1"
+                        CornerRadius="12"
+                        Background="{StaticResource SurfaceBrush}">
+                    <DataGrid Name="ProxyDataGrid"
+                              MinHeight="120"
+                              AlternationCount="2"
+                              CanUserAddRows="False"
+                              SelectionMode="Single"
+                              PreviewMouseWheel="ProxyDataGrid_PreviewMouseWheel">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="*" />
+                            <DataGridTextColumn Header="协议" Binding="{Binding Type}" Width="90" />
+                            <DataGridTextColumn Header="本地 IP" Binding="{Binding LocalIP}" Width="*" />
+                            <DataGridTextColumn Header="本地端口" Binding="{Binding LocalPort}" Width="110" />
+                            <DataGridTextColumn Header="服务器端口" Binding="{Binding RemotePort}" Width="120" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Border>
+            </Grid>
+        </Border>
+    </Grid>
+</UserControl>
