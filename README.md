@@ -16,6 +16,7 @@
 - 从 GitHub Releases 获取 frp 可下载版本
 - 支持按系统架构筛选 frpc 下载包
 - 支持下载并安装匹配当前 Windows 架构的 frpc
+- 支持多个配置方案，可新建、复制、重命名和删除配置
 - 将运行时 frp 文件保存到用户数据目录，避免修改安装目录
 
 ## 运行环境
@@ -88,12 +89,30 @@ FrpClient.App.exe
 程序运行时会把 frpc 和配置文件复制到当前用户的数据目录：
 
 ```text
-%LocalAppData%\FrpClient\frp
+%LocalAppData%\FrpClient
 ```
 
 这样做的原因是发布目录可能没有写入权限，而配置文件和下载的 frpc 版本需要允许用户修改。
 
 在客户端顶部可以点击“打开目录”快速进入这个文件夹。
+
+多配置功能启用后，目录大致如下：
+
+```text
+%LocalAppData%\FrpClient\
+├── frp\
+│   ├── frpc.exe
+│   ├── LICENSE
+│   └── downloads\
+└── profiles\
+    ├── profiles.json
+    ├── default\
+    │   └── frpc.toml
+    └── profile-2\
+        └── frpc.toml
+```
+
+`frp/frpc.exe` 是所有配置共用的 frpc 程序；`profiles/*/frpc.toml` 是每个配置方案自己的配置文件。
 
 ## 下载 frpc 版本
 

@@ -7,6 +7,8 @@ using System.Text; // 提供 StringBuilder 和 UTF8 编码，用来生成配置�
 using System.Text.Json; // 提供 JsonDocument，用来解析 GitHub Releases API 返回的 JSON
 using System.Text.RegularExpressions; // 提供 Regex，用来校验用户输入的版本号
 using System.Windows; // 提供 WPF 的 Window、RoutedEventArgs 等基础类型
+using System.Windows.Controls; // 提供 ComboBox、TextBox、StackPanel 等 WPF 控件类型
+using System.Windows.Input; // 提供 Key，用来处理弹窗里的 Enter/Esc
 using System.Windows.Media; // 提供颜色、画刷等界面显示相关类型
 
 namespace FrpClient.App;
@@ -21,40 +23,54 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
 
     private Process? _frpcProcess; // 保存当前启动的 frpc 进程；? 表示它可以是 null
     private readonly string _frpcExePath; // 用户数据目录里 frpc.exe 的完整路径；readonly 表示构造函数赋值后不再改
-    private readonly string _frpcConfigPath; // 用户数据目录里 frpc.toml 的完整路径
+    private readonly FrpProfileStore _profileStore; // 管理多个配置方案和 profiles.json
     private readonly ObservableCollection<FrpProxyConfig> _proxies = []; // 表格显示的端口转发列表
+    private FrpProfileInfo _activeProfile; // 当前正在编辑和运行的配置方案
+    private bool _isSynchronizingProfileSelection; // 程序主动同步下拉框时，避免触发切换逻辑
     private bool _isRunning; // 保存当前运行状态，方便同步到概览页
+    private bool _isDownloadingFrpc; // 下载或安装 frpc 时，暂时不允许切换配置
+    private bool _hasLoadedFrpReleases; // 是否已经进入过下载页并成功加载 release 列表
+    private bool _isLoadingFrpReleases; // 避免重复触发 GitHub release 请求
+    private string _frpcConfigPath => _profileStore.GetConfigPath(_activeProfile); // 当前配置方案对应的 frpc.toml
 
     public MainWindow() // 构造函数：窗口创建时会先执行这里
     {
         InitializeComponent(); // 加载 MainWindow.xaml 里写的界面控件
 
         _frpcExePath = InitializeUserFrpFile("frpc.exe"); // 从内置模板复制到用户数据目录，后续运行和下载都用这份
-        _frpcConfigPath = InitializeUserFrpFile("frpc.toml"); // 配置文件也放到用户数据目录，避免安装目录无写入权限
+        var legacyConfigPath = InitializeUserFrpFile("frpc.toml"); // 旧版单配置文件路径；首次启用多配置时会复制成默认 profile
         InitializeUserFrpFile("LICENSE"); // 许可证文件不参与运行，但一起复制，方便发布后保留说明
+        _profileStore = FrpProfileStore.Load(GetUserProfilesDirectory(), legacyConfigPath);
+        _activeProfile = _profileStore.GetActiveProfile();
         var frpcVersion = GetFrpcVersion(_frpcExePath); // 调用 frpc.exe --version，得到当前内置客户端版本
         UpdateFrpcVersionDisplay(frpcVersion); // 同步顶部卡片和下载页里的版本显示
 
         OverviewView.BindProxies(_proxies); // 首页卡片列表显示同一份转发规则
         ConfigurationView.BindProxies(_proxies); // 配置页表格显示同一份转发规则
+        BindProfilesToComboBox();
         ConfigurationView.SaveConfigRequested += SaveConfigButton_Click;
         ConfigurationView.AddProxyRequested += AddProxyButton_Click;
         ConfigurationView.DeleteSelectedProxyRequested += DeleteSelectedProxyButton_Click;
         DownloadView.RefreshRequested += DownloadView_RefreshRequested;
         DownloadView.DownloadRequested += DownloadView_DownloadRequested;
         LoadConfigToForm(); // 启动时读取 frpc.toml，并填充到配置页面
-        _ = LoadFrpReleasesToDownloadViewAsync(); // 后台加载 GitHub 可下载版本，不阻塞窗口显示
+        DownloadView.SetStatus("进入下载页后加载 GitHub Releases。");
 
         AppendLog("客户端已启动。"); // 往日志框追加一行文字
         AppendLog($"frpc 版本：{frpcVersion}");
-        AppendLog($"frp 数据目录：{GetUserFrpDirectory()}");
+        AppendLog($"数据目录：{GetUserDataDirectory()}");
+        AppendLog($"当前配置：{_activeProfile.Name}");
         AppendLog($"配置文件：{_frpcConfigPath}"); // $"" 是字符串插值，类似 Java/Python 里的格式化字符串
     }
 
     private void LoadConfigToForm() // 把 frpc.toml 读取到界面输入框和表格里
     {
+        _profileStore.EnsureProfileConfigFile(_activeProfile);
         _proxies.Clear();
+        ConfigurationView.ServerAddr = "";
         ConfigurationView.ServerPort = "7000";
+        ConfigurationView.AuthToken = "";
+        ConfigurationView.ResetNewProxyForm();
         ConfigurationView.ResetProxyDefaults();
 
         if (!File.Exists(_frpcConfigPath))
@@ -136,7 +152,7 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
             }
         }
 
-        ConfigStatusTextBlock.Text = $"已加载配置：{_frpcConfigPath}";
+        ConfigStatusTextBlock.Text = $"已加载配置“{_activeProfile.Name}”：{_frpcConfigPath}";
         UpdateOverview();
     }
 
@@ -196,6 +212,181 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
         UpdateOverview();
     }
 
+    private void ProfileComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e) // 切换当前配置方案
+    {
+        if (_isSynchronizingProfileSelection || ProfileComboBox.SelectedItem is not FrpProfileInfo selectedProfile)
+        {
+            return;
+        }
+
+        if (selectedProfile.Id == _activeProfile.Id)
+        {
+            return;
+        }
+
+        if (!CanChangeProfile())
+        {
+            SelectProfileInComboBox(_activeProfile);
+            return;
+        }
+
+        if (!SaveConfigFromForm())
+        {
+            SelectProfileInComboBox(_activeProfile);
+            return;
+        }
+
+        ActivateProfile(selectedProfile);
+    }
+
+    private void RefreshProfileButton_Click(object sender, RoutedEventArgs e) // 从当前配置文件重新读取到界面
+    {
+        var result = MessageBox.Show(
+            $"将重新读取配置“{_activeProfile.Name}”的 frpc.toml。\n\n当前界面中未保存的修改会被覆盖，是否继续？",
+            "刷新配置",
+            MessageBoxButton.OKCancel,
+            MessageBoxImage.Question);
+
+        if (result != MessageBoxResult.OK)
+        {
+            return;
+        }
+
+        try
+        {
+            LoadConfigToForm();
+            ConfigStatusTextBlock.Text = $"已刷新配置“{_activeProfile.Name}”：{_frpcConfigPath}";
+            AppendLog($"已从文件刷新配置“{_activeProfile.Name}”。");
+
+            if (_isRunning)
+            {
+                AppendLog("frpc 正在运行，刷新界面不会让运行中的 frpc 立即使用新配置，需要重启服务后生效。");
+            }
+        }
+        catch (Exception ex)
+        {
+            ConfigStatusTextBlock.Text = "刷新配置失败。";
+            AppendLog($"刷新配置失败：{ex.Message}");
+            MessageBox.Show($"刷新配置失败：{ex.Message}", "刷新失败", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void NewProfileButton_Click(object sender, RoutedEventArgs e) // 新建一个空配置方案
+    {
+        if (!CanChangeProfile() || !SaveConfigFromForm())
+        {
+            return;
+        }
+
+        var name = ShowProfileNameDialog("新建配置", "配置名称", "新配置");
+
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return;
+        }
+
+        try
+        {
+            var profile = _profileStore.CreateProfile(name, sourceProfile: null);
+            ActivateProfile(profile);
+            AppendLog($"已新建配置：{profile.Name}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"新建配置失败：{ex.Message}", "新建失败", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void DuplicateProfileButton_Click(object sender, RoutedEventArgs e) // 复制当前配置方案
+    {
+        if (!CanChangeProfile())
+        {
+            return;
+        }
+
+        if (!SaveConfigFromForm())
+        {
+            return;
+        }
+
+        var name = ShowProfileNameDialog("复制配置", "新配置名称", $"{_activeProfile.Name} 副本");
+
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return;
+        }
+
+        try
+        {
+            var profile = _profileStore.CreateProfile(name, _activeProfile);
+            ActivateProfile(profile);
+            AppendLog($"已复制配置：{profile.Name}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"复制配置失败：{ex.Message}", "复制失败", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void RenameProfileButton_Click(object sender, RoutedEventArgs e) // 重命名当前配置方案
+    {
+        var name = ShowProfileNameDialog("重命名配置", "配置名称", _activeProfile.Name);
+
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return;
+        }
+
+        try
+        {
+            _profileStore.RenameProfile(_activeProfile, name);
+            BindProfilesToComboBox();
+            ConfigStatusTextBlock.Text = $"当前配置已重命名为“{_activeProfile.Name}”。";
+            AppendLog($"当前配置已重命名为：{_activeProfile.Name}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"重命名配置失败：{ex.Message}", "重命名失败", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void DeleteProfileButton_Click(object sender, RoutedEventArgs e) // 删除当前配置方案
+    {
+        if (!CanChangeProfile())
+        {
+            return;
+        }
+
+        if (_profileStore.Profiles.Count <= 1)
+        {
+            MessageBox.Show("至少需要保留一个配置。", "无法删除", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var result = MessageBox.Show(
+            $"确定删除配置“{_activeProfile.Name}”吗？\n\n对应的 frpc.toml 会一起删除。",
+            "删除配置",
+            MessageBoxButton.OKCancel,
+            MessageBoxImage.Warning);
+
+        if (result != MessageBoxResult.OK)
+        {
+            return;
+        }
+
+        try
+        {
+            var deletedProfileName = _activeProfile.Name;
+            var nextProfile = _profileStore.DeleteProfile(_activeProfile);
+            ActivateProfile(nextProfile);
+            AppendLog($"已删除配置：{deletedProfileName}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"删除配置失败：{ex.Message}", "删除失败", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
     private bool SaveConfigFromForm() // 把界面里的配置重新生成并写入 frpc.toml
     {
         ConfigurationView.CommitProxyGridEdits(); // 保存前提交正在编辑的表格内容
@@ -215,8 +406,8 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
             }
 
             File.WriteAllText(_frpcConfigPath, configText, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-            ConfigStatusTextBlock.Text = $"配置已保存：{_frpcConfigPath}";
-            AppendLog("配置已保存。");
+            ConfigStatusTextBlock.Text = $"配置“{_activeProfile.Name}”已保存：{_frpcConfigPath}";
+            AppendLog($"配置“{_activeProfile.Name}”已保存。");
             UpdateOverview();
 
             if (_frpcProcess is not null && !_frpcProcess.HasExited)
@@ -232,6 +423,197 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
             ConfigStatusTextBlock.Text = "保存配置失败。";
             return false;
         }
+    }
+
+    private void BindProfilesToComboBox() // 把 profiles.json 中的配置列表同步到下拉框
+    {
+        _isSynchronizingProfileSelection = true;
+
+        try
+        {
+            ProfileComboBox.ItemsSource = null;
+            ProfileComboBox.DisplayMemberPath = nameof(FrpProfileInfo.Name);
+            ProfileComboBox.ItemsSource = _profileStore.Profiles;
+            ProfileComboBox.SelectedItem = _activeProfile;
+            UpdateProfileControlsState();
+        }
+        finally
+        {
+            _isSynchronizingProfileSelection = false;
+        }
+    }
+
+    private void SelectProfileInComboBox(FrpProfileInfo profile) // 切换失败时，把下拉框选项恢复为当前配置
+    {
+        _isSynchronizingProfileSelection = true;
+
+        try
+        {
+            ProfileComboBox.SelectedItem = profile;
+        }
+        finally
+        {
+            _isSynchronizingProfileSelection = false;
+        }
+    }
+
+    private void ActivateProfile(FrpProfileInfo profile) // 设置当前配置并重新读取对应的 frpc.toml
+    {
+        _activeProfile = profile;
+        _profileStore.SetActiveProfile(profile);
+        BindProfilesToComboBox();
+        LoadConfigToForm();
+        AppendLog($"已切换到配置：{profile.Name}");
+        AppendLog($"配置文件：{_frpcConfigPath}");
+    }
+
+    private bool CanChangeProfile() // frpc 运行或下载中时，不允许切换配置
+    {
+        if (_isRunning)
+        {
+            MessageBox.Show("请先停止 frpc，再切换或管理配置。", "frpc 正在运行", MessageBoxButton.OK, MessageBoxImage.Information);
+            return false;
+        }
+
+        if (_isDownloadingFrpc)
+        {
+            MessageBox.Show("请等待 frpc 下载完成后再切换或管理配置。", "正在下载", MessageBoxButton.OK, MessageBoxImage.Information);
+            return false;
+        }
+
+        return true;
+    }
+
+    private void UpdateProfileControlsState() // 根据运行状态更新 profile 管理按钮
+    {
+        if (ProfileComboBox is null)
+        {
+            return;
+        }
+
+        var canEditProfile = !_isRunning && !_isDownloadingFrpc;
+        ProfileComboBox.IsEnabled = canEditProfile;
+        RefreshProfileButton.IsEnabled = !_isDownloadingFrpc;
+        NewProfileButton.IsEnabled = canEditProfile;
+        DuplicateProfileButton.IsEnabled = canEditProfile;
+        RenameProfileButton.IsEnabled = canEditProfile;
+        DeleteProfileButton.IsEnabled = canEditProfile && _profileStore.Profiles.Count > 1;
+    }
+
+    private string? ShowProfileNameDialog(string title, string prompt, string defaultName) // 简单的配置名称输入弹窗
+    {
+        var dialog = new Window
+        {
+            Title = title,
+            Owner = this,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            ResizeMode = ResizeMode.NoResize,
+            SizeToContent = SizeToContent.WidthAndHeight,
+            Background = new SolidColorBrush(Color.FromRgb(247, 249, 252))
+        };
+
+        var root = new Grid
+        {
+            Margin = new Thickness(18),
+            MinWidth = 340
+        };
+
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+        var promptTextBlock = new TextBlock
+        {
+            Text = prompt,
+            Foreground = new SolidColorBrush(Color.FromRgb(84, 96, 112)),
+            FontSize = 12
+        };
+        Grid.SetRow(promptTextBlock, 0);
+
+        var textBox = new TextBox
+        {
+            Text = defaultName,
+            Margin = new Thickness(0, 7, 0, 0),
+            MinWidth = 320
+        };
+        Grid.SetRow(textBox, 1);
+
+        var errorTextBlock = new TextBlock
+        {
+            Margin = new Thickness(0, 7, 0, 0),
+            Foreground = new SolidColorBrush(Color.FromRgb(207, 34, 46)),
+            FontSize = 12
+        };
+        Grid.SetRow(errorTextBlock, 2);
+
+        var buttonPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0, 16, 0, 0)
+        };
+        Grid.SetRow(buttonPanel, 3);
+
+        var cancelButton = new Button
+        {
+            Width = 84,
+            Content = "取消"
+        };
+        cancelButton.Click += (_, _) => dialog.DialogResult = false;
+
+        var okButton = new Button
+        {
+            Width = 84,
+            Margin = new Thickness(8, 0, 0, 0),
+            Content = "确定",
+            Background = (Brush)FindResource("PrimaryBrush"),
+            BorderBrush = (Brush)FindResource("PrimaryBrush"),
+            Foreground = Brushes.White
+        };
+        okButton.Click += (_, _) =>
+        {
+            var value = textBox.Text.Trim();
+
+            if (value.Length == 0)
+            {
+                errorTextBlock.Text = "配置名称不能为空。";
+                return;
+            }
+
+            dialog.Tag = value;
+            dialog.DialogResult = true;
+        };
+
+        textBox.KeyDown += (_, args) =>
+        {
+            if (args.Key == Key.Enter)
+            {
+                okButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                args.Handled = true;
+            }
+            else if (args.Key == Key.Escape)
+            {
+                dialog.DialogResult = false;
+                args.Handled = true;
+            }
+        };
+
+        buttonPanel.Children.Add(cancelButton);
+        buttonPanel.Children.Add(okButton);
+        root.Children.Add(promptTextBlock);
+        root.Children.Add(textBox);
+        root.Children.Add(errorTextBlock);
+        root.Children.Add(buttonPanel);
+
+        dialog.Content = root;
+        dialog.Loaded += (_, _) =>
+        {
+            textBox.Focus();
+            textBox.SelectAll();
+        };
+
+        return dialog.ShowDialog() == true ? dialog.Tag?.ToString() : null;
     }
 
     private bool TryBuildConfigText(out string configText) // 校验界面输入，并生成 frpc.toml 内容
@@ -400,25 +782,49 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
         StopFrpcProcess();
     }
 
-    private void OpenFrpFolderButton_Click(object sender, RoutedEventArgs e) // 打开用户数据目录里的 frp 文件夹
+    private void OpenFrpFolderButton_Click(object sender, RoutedEventArgs e) // 打开用户数据目录，里面包含 frp 程序和 profiles 配置
     {
-        var userFrpDirectory = GetUserFrpDirectory();
+        var userDataDirectory = GetUserDataDirectory();
 
         try
         {
-            Directory.CreateDirectory(userFrpDirectory);
+            Directory.CreateDirectory(userDataDirectory);
             Process.Start(new ProcessStartInfo
             {
-                FileName = userFrpDirectory,
+                FileName = userDataDirectory,
                 UseShellExecute = true
             });
-            AppendLog($"已打开 frp 数据目录：{userFrpDirectory}");
+            AppendLog($"已打开数据目录：{userDataDirectory}");
         }
         catch (Exception ex)
         {
-            AppendLog($"打开 frp 数据目录失败：{ex.Message}");
-            MessageBox.Show($"打开 frp 数据目录失败：{ex.Message}", "打开目录失败", MessageBoxButton.OK, MessageBoxImage.Error);
+            AppendLog($"打开数据目录失败：{ex.Message}");
+            MessageBox.Show($"打开数据目录失败：{ex.Message}", "打开目录失败", MessageBoxButton.OK, MessageBoxImage.Error);
         }
+    }
+
+    private async void MainTabControl_SelectionChanged(object sender, SelectionChangedEventArgs e) // 第一次进入下载页时才读取 GitHub Releases
+    {
+        if (!ReferenceEquals(e.OriginalSource, MainTabControl))
+        {
+            return;
+        }
+
+        if (MainTabControl.SelectedItem is TabItem selectedTab &&
+            ReferenceEquals(selectedTab.Content, DownloadView))
+        {
+            await EnsureFrpReleasesLoadedAsync();
+        }
+    }
+
+    private async Task EnsureFrpReleasesLoadedAsync() // 下载页懒加载：没进入下载页就不访问 GitHub
+    {
+        if (_hasLoadedFrpReleases || _isLoadingFrpReleases)
+        {
+            return;
+        }
+
+        await LoadFrpReleasesToDownloadViewAsync();
     }
 
     private async void DownloadView_RefreshRequested(object? sender, EventArgs e) // 下载页点击“刷新列表”时执行
@@ -575,6 +981,7 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
         StatusTextBlock.Foreground = isRunning // 修改状态文字颜色
             ? new SolidColorBrush(Color.FromRgb(26, 127, 55)) // 运行中显示绿色
             : new SolidColorBrush(Color.FromRgb(207, 34, 46)); // 未运行显示红色
+        UpdateProfileControlsState();
         UpdateOverview();
     }
 
@@ -615,9 +1022,11 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
 
     private void SetFrpcDownloadState(bool isDownloading) // 下载过程中临时禁用按钮，避免重复点击
     {
+        _isDownloadingFrpc = isDownloading;
         DownloadView.SetBusy(isDownloading);
         StartButton.IsEnabled = !isDownloading && !_isRunning;
         StopButton.IsEnabled = !isDownloading && _isRunning;
+        UpdateProfileControlsState();
     }
 
     private void UpdateFrpcVersionDisplay(string version) // 同步所有展示 frpc 版本号的位置
@@ -628,6 +1037,12 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
 
     private async Task LoadFrpReleasesToDownloadViewAsync() // 从 GitHub 读取可下载版本，并交给下载页显示
     {
+        if (_isLoadingFrpReleases)
+        {
+            return;
+        }
+
+        _isLoadingFrpReleases = true;
         DownloadView.SetBusy(true);
         DownloadView.SetStatus("正在读取 GitHub Releases...");
         DownloadView.ResetDownloadProgress();
@@ -637,6 +1052,7 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
             var releases = await LoadFrpReleasesAsync();
             DownloadView.SetReleases(releases);
             DownloadView.SetStatus($"已加载 {releases.Count} 个可下载包");
+            _hasLoadedFrpReleases = true;
             AppendLog($"已加载 {releases.Count} 个 GitHub Releases 可下载包。");
         }
         catch (Exception ex)
@@ -646,6 +1062,7 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
         }
         finally
         {
+            _isLoadingFrpReleases = false;
             DownloadView.SetBusy(false);
             DownloadView.SetServiceRunning(_isRunning);
         }
@@ -1093,7 +1510,7 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
         return userFilePath;
     }
 
-    private static string GetUserFrpDirectory() // Windows 用户数据目录，例如 C:\Users\name\AppData\Local\FrpClient\frp
+    private static string GetUserDataDirectory() // Windows 用户数据根目录，例如 C:\Users\name\AppData\Local\FrpClient
     {
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
 
@@ -1102,7 +1519,17 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
             localAppData = AppContext.BaseDirectory;
         }
 
-        return Path.Combine(localAppData, "FrpClient", "frp");
+        return Path.Combine(localAppData, "FrpClient");
+    }
+
+    private static string GetUserFrpDirectory() // frpc.exe、LICENSE 和下载目录所在位置
+    {
+        return Path.Combine(GetUserDataDirectory(), "frp");
+    }
+
+    private static string GetUserProfilesDirectory() // 多配置方案所在位置
+    {
+        return Path.Combine(GetUserDataDirectory(), "profiles");
     }
 
     private static string FindBundledFrpFile(string fileName) // 查找随客户端一起发布的 frp 模板文件
