@@ -12,6 +12,8 @@ public partial class OverviewView : UserControl
         InitializeComponent();
     }
 
+    public event EventHandler<OverviewProxyCopyRequestedEventArgs>? CopyProxyServerEndpointRequested;
+
     public void BindProxies(IEnumerable proxies)
     {
         OverviewProxyItemsControl.ItemsSource = proxies;
@@ -35,4 +37,22 @@ public partial class OverviewView : UserControl
     {
         OverviewProxyItemsControl.Items.Refresh();
     }
+
+    private void CopyProxyServerEndpointButton_Click(object sender, RoutedEventArgs e) // 点击卡片上的复制地址按钮
+    {
+        if (sender is Button { Tag: global::FrpClient.App.FrpProxyConfig proxy })
+        {
+            CopyProxyServerEndpointRequested?.Invoke(this, new OverviewProxyCopyRequestedEventArgs(proxy));
+        }
+    }
+}
+
+public class OverviewProxyCopyRequestedEventArgs : EventArgs // 携带用户点击的端口转发规则
+{
+    public OverviewProxyCopyRequestedEventArgs(global::FrpClient.App.FrpProxyConfig proxy)
+    {
+        Proxy = proxy;
+    }
+
+    public global::FrpClient.App.FrpProxyConfig Proxy { get; }
 }

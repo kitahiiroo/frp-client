@@ -1,4 +1,4 @@
-﻿using System.Collections.ObjectModel; // 提供 ObservableCollection，用来让表格显示端口转发列表
+using System.Collections.ObjectModel; // 提供 ObservableCollection，用来让表格显示端口转发列表
 using System.Diagnostics; // 提供 Process，用来启动、停止外部 exe 程序
 using System.IO; // 提供 File、Path、DirectoryInfo，用来处理文件和路径
 using System.IO.Compression; // 提供 ZipFile，用来解压 GitHub 下载的 frp 压缩包
@@ -19,12 +19,16 @@ namespace FrpClient.App;
 /// </summary>
 public partial class MainWindow : Window // partial 表示这个类还有一部分由 WPF 根据 MainWindow.xaml 自动生成
 {
+    private const int ClipboardCopyRetryCount = 20; // 剪贴板可能被其他程序短暂占用，复制时允许重试几次
+    private const int ClipboardCopyRetryDelayMilliseconds = 100; // 每次重试之间等待的毫秒数
     private static readonly HttpClient FrpDownloadHttpClient = CreateFrpDownloadHttpClient(); // 复用同一个 HttpClient，避免频繁创建网络连接
 
     private Process? _frpcProcess; // 保存当前启动的 frpc 进程；? 表示它可以是 null
     private readonly string _frpcExePath; // 用户数据目录里 frpc.exe 的完整路径；readonly 表示构造函数赋值后不再改
     private readonly FrpProfileStore _profileStore; // 管理多个配置方案和 profiles.json
-    private readonly ObservableCollection<FrpProxyConfig> _proxies = []; // 表格显示的端口转发列表
+    private readonly ObservableCollection<FrpProxyConfig> _proxies = []; // 表格显示的转发规则（含 tcp/udp 和 stcp）
+    private FrpClientCapabilities _frpcCapabilities = FrpClientCapabilities.Unknown; // 当前 frpc 的版本和功能支持情况
+    private FrpProxyConfig? _editingProxy; // 正在编辑的规则；null 表示表单处于“新增”状态
     private FrpProfileInfo _activeProfile; // 当前正在编辑和运行的配置方案
     private bool _isSynchronizingProfileSelection; // 程序主动同步下拉框时，避免触发切换逻辑
     private bool _isRunning; // 保存当前运行状态，方便同步到概览页
@@ -42,30 +46,37 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
         InitializeUserFrpFile("LICENSE"); // 许可证文件不参与运行，但一起复制，方便发布后保留说明
         _profileStore = FrpProfileStore.Load(GetUserProfilesDirectory(), legacyConfigPath);
         _activeProfile = _profileStore.GetActiveProfile();
-        var frpcVersion = GetFrpcVersion(_frpcExePath); // 调用 frpc.exe --version，得到当前内置客户端版本
-        UpdateFrpcVersionDisplay(frpcVersion); // 同步顶部卡片和下载页里的版本显示
+        _frpcCapabilities = FrpClientCapabilities.Detect(_frpcExePath); // 读取 frpc 版本，并检测 STCP 等功能的支持情况
+        UpdateFrpcVersionDisplay(_frpcCapabilities.VersionText); // 同步顶部卡片和下载页里的版本显示
 
         OverviewView.BindProxies(_proxies); // 首页卡片列表显示同一份转发规则
         ConfigurationView.BindProxies(_proxies); // 配置页表格显示同一份转发规则
         BindProfilesToComboBox();
+        OverviewView.CopyProxyServerEndpointRequested += OverviewView_CopyProxyServerEndpointRequested;
         ConfigurationView.SaveConfigRequested += SaveConfigButton_Click;
         ConfigurationView.AddProxyRequested += AddProxyButton_Click;
         ConfigurationView.DeleteSelectedProxyRequested += DeleteSelectedProxyButton_Click;
+        ConfigurationView.EditSelectedProxyRequested += EditSelectedProxyButton_Click;
+        ConfigurationView.CancelEditRequested += CancelEditButton_Click;
+        ConfigurationView.DetectVersionRequested += DetectVersionButton_Click;
         DownloadView.RefreshRequested += DownloadView_RefreshRequested;
         DownloadView.DownloadRequested += DownloadView_DownloadRequested;
-        LoadConfigToForm(); // 启动时读取 frpc.toml，并填充到配置页面
-        DownloadView.SetStatus("进入下载页后加载 GitHub Releases。");
 
         AppendLog("客户端已启动。"); // 往日志框追加一行文字
-        AppendLog($"frpc 版本：{frpcVersion}");
+        AppendLog($"frpc 版本：{_frpcCapabilities.VersionText}");
         AppendLog($"数据目录：{GetUserDataDirectory()}");
         AppendLog($"当前配置：{_activeProfile.Name}");
         AppendLog($"配置文件：{_frpcConfigPath}"); // $"" 是字符串插值，类似 Java/Python 里的格式化字符串
+
+        ApplyCapabilityState(); // 把版本检测结果显示到配置页横幅和类型下拉框
+        LoadConfigToForm(); // 启动时读取 frpc.toml，并填充到配置页面
+        DownloadView.SetStatus("进入下载页后加载 GitHub Releases。");
     }
 
     private void LoadConfigToForm() // 把 frpc.toml 读取到界面输入框和表格里
     {
         _profileStore.EnsureProfileConfigFile(_activeProfile);
+        FinishEditingProxy();
         _proxies.Clear();
         ConfigurationView.ServerAddr = "";
         ConfigurationView.ServerPort = "7000";
@@ -80,76 +91,25 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
             return;
         }
 
-        FrpProxyConfig? currentProxy = null; // 当前正在读取的 [[proxies]]，null 表示还在读取全局配置
+        var document = FrpConfigSerializer.Parse(File.ReadAllText(_frpcConfigPath), out var warnings);
 
-        foreach (var line in File.ReadAllLines(_frpcConfigPath))
+        ConfigurationView.ServerAddr = document.ServerAddr;
+        ConfigurationView.ServerPort = string.IsNullOrWhiteSpace(document.ServerPort) ? "7000" : document.ServerPort;
+        ConfigurationView.AuthToken = document.AuthToken;
+
+        foreach (var rule in document.Rules)
         {
-            var trimmedLine = line.Trim();
+            _proxies.Add(rule);
+        }
 
-            if (trimmedLine.Length == 0 || trimmedLine.StartsWith("#"))
-            {
-                continue;
-            }
+        foreach (var warning in warnings) // 解析器会报告被忽略的段落，例如暂不支持的 xtcp 访问端
+        {
+            AppendLog(warning);
+        }
 
-            if (trimmedLine.Equals("[[proxies]]", StringComparison.OrdinalIgnoreCase))
-            {
-                currentProxy = new FrpProxyConfig
-                {
-                    Type = "tcp",
-                    LocalIP = "127.0.0.1"
-                };
-                _proxies.Add(currentProxy);
-                continue;
-            }
-
-            var equalsIndex = trimmedLine.IndexOf('=');
-
-            if (equalsIndex < 0)
-            {
-                continue;
-            }
-
-            var key = trimmedLine[..equalsIndex].Trim();
-            var value = UnquoteTomlValue(trimmedLine[(equalsIndex + 1)..]);
-
-            if (currentProxy is null)
-            {
-                if (key == "serverAddr")
-                {
-                    ConfigurationView.ServerAddr = value;
-                }
-                else if (key == "serverPort")
-                {
-                    ConfigurationView.ServerPort = value;
-                }
-                else if (key == "auth.token")
-                {
-                    ConfigurationView.AuthToken = value;
-                }
-            }
-            else
-            {
-                if (key == "name")
-                {
-                    currentProxy.Name = value;
-                }
-                else if (key == "type")
-                {
-                    currentProxy.Type = value;
-                }
-                else if (key == "localIP")
-                {
-                    currentProxy.LocalIP = value;
-                }
-                else if (key == "localPort")
-                {
-                    currentProxy.LocalPort = value;
-                }
-                else if (key == "remotePort")
-                {
-                    currentProxy.RemotePort = value;
-                }
-            }
+        if (_proxies.Any(rule => rule.IsStcp) && !_frpcCapabilities.SupportsStcp)
+        {
+            AppendLog($"当前 frpc {_frpcCapabilities.VersionText} 不支持 STCP，配置中的 STCP 规则无法启动。");
         }
 
         ConfigStatusTextBlock.Text = $"已加载配置“{_activeProfile.Name}”：{_frpcConfigPath}";
@@ -161,50 +121,208 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
         SaveConfigFromForm();
     }
 
-    private void AddProxyButton_Click(object sender, RoutedEventArgs e) // 点击“添加转发”按钮时执行
+    private void AddProxyButton_Click(object sender, RoutedEventArgs e) // 点击“添加转发/保存修改”按钮时执行
     {
+        if (!TryBuildRuleFromForm(out var rule))
+        {
+            return;
+        }
+
+        if (_editingProxy is not null)
+        {
+            var index = _proxies.IndexOf(_editingProxy);
+
+            if (index >= 0)
+            {
+                _proxies[index] = rule;
+            }
+
+            FinishEditingProxy();
+            ConfigStatusTextBlock.Text = $"已更新规则“{rule.Name}”，点击“保存配置”后写入 frpc.toml。";
+        }
+        else
+        {
+            _proxies.Add(rule);
+            ConfigurationView.ResetNewProxyForm();
+            ConfigStatusTextBlock.Text = "已添加转发规则，点击“保存配置”后写入 frpc.toml。";
+        }
+
+        UpdateOverview();
+    }
+
+    private void EditSelectedProxyButton_Click(object sender, RoutedEventArgs e) // 把表格里选中的规则放回表单修改
+    {
+        if (ConfigurationView.SelectedProxy is not FrpProxyConfig selectedProxy)
+        {
+            MessageBox.Show("请先在表格中选择要编辑的规则。", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        _editingProxy = selectedProxy;
+        ConfigurationView.FillProxyForm(selectedProxy);
+        ConfigurationView.SetEditMode(true, selectedProxy.Name);
+        ConfigStatusTextBlock.Text = $"正在编辑规则“{selectedProxy.Name}”，修改后点击“保存修改”。";
+    }
+
+    private void CancelEditButton_Click(object sender, RoutedEventArgs e)
+    {
+        FinishEditingProxy();
+        ConfigStatusTextBlock.Text = "已取消编辑。";
+    }
+
+    private void FinishEditingProxy() // 退出编辑状态并清空表单
+    {
+        _editingProxy = null;
+        ConfigurationView.SetEditMode(false, null);
+        ConfigurationView.ResetNewProxyForm();
+    }
+
+    private bool TryBuildRuleFromForm(out FrpProxyConfig rule) // 从表单生成一条规则，并检查必填项
+    {
+        rule = new FrpProxyConfig();
+
         var proxyName = ConfigurationView.ProxyName.Trim();
         var proxyType = ConfigurationView.ProxyType;
+        var proxyRole = ConfigurationView.ProxyRole;
         var localIP = string.IsNullOrWhiteSpace(ConfigurationView.LocalIp) ? "127.0.0.1" : ConfigurationView.LocalIp.Trim();
 
         if (proxyName.Length == 0)
         {
             MessageBox.Show("转发名称不能为空。", "配置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
-            return;
+            return false;
         }
 
-        if (_proxies.Any(proxy => string.Equals(proxy.Name, proxyName, StringComparison.OrdinalIgnoreCase)))
+        if (_proxies.Any(proxy =>
+                !ReferenceEquals(proxy, _editingProxy) &&
+                string.Equals(proxy.Name, proxyName, StringComparison.OrdinalIgnoreCase)))
         {
             MessageBox.Show("转发名称不能重复。", "配置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
-            return;
+            return false;
         }
 
-        if (!TryReadPort(ConfigurationView.LocalPort, "本地端口", out var localPort) ||
-            !TryReadPort(ConfigurationView.RemotePort, "远程端口", out var remotePort))
+        if (proxyType == FrpRuleTypes.Stcp && !_frpcCapabilities.SupportsStcp)
         {
-            return;
+            ShowStcpNotSupportedMessage();
+            return false;
         }
 
-        _proxies.Add(new FrpProxyConfig
+        if (proxyType is not (FrpRuleTypes.Tcp or FrpRuleTypes.Udp or FrpRuleTypes.Stcp))
+        {
+            MessageBox.Show($"不支持的转发类型：{proxyType}。", "配置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+
+        if (proxyType == FrpRuleTypes.Stcp && proxyRole == FrpRuleTypes.VisitorRole)
+        {
+            var serverName = ConfigurationView.ServerName.Trim();
+            var secretKey = ConfigurationView.SecretKey.Trim();
+            var bindAddr = string.IsNullOrWhiteSpace(ConfigurationView.BindAddr) ? "127.0.0.1" : ConfigurationView.BindAddr.Trim();
+
+            if (serverName.Length == 0)
+            {
+                MessageBox.Show("STCP 访问端需要填写服务器名称（即服务端规则的名称）。", "配置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return false;
+            }
+
+            if (secretKey.Length == 0)
+            {
+                MessageBox.Show("STCP 密钥不能为空，服务端和访问端必须填写相同的密钥。", "配置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return false;
+            }
+
+            if (!TryReadPort(ConfigurationView.BindPort, "STCP 监听端口（bindPort）", out var bindPort))
+            {
+                return false;
+            }
+
+            rule = new FrpProxyConfig
+            {
+                Name = proxyName,
+                Type = FrpRuleTypes.Stcp,
+                Role = FrpRuleTypes.VisitorRole,
+                ServerName = serverName,
+                SecretKey = secretKey,
+                BindAddr = bindAddr,
+                BindPort = bindPort.ToString()
+            };
+
+            return true;
+        }
+
+        if (localIP.Length == 0)
+        {
+            MessageBox.Show("本地 IP 不能为空。", "配置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+
+        if (!TryReadPort(ConfigurationView.LocalPort, "本地端口", out var localPort))
+        {
+            return false;
+        }
+
+        if (proxyType == FrpRuleTypes.Stcp)
+        {
+            var secretKey = ConfigurationView.SecretKey.Trim();
+
+            if (secretKey.Length == 0)
+            {
+                MessageBox.Show("STCP 密钥不能为空，服务端和访问端必须填写相同的密钥。", "配置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return false;
+            }
+
+            rule = new FrpProxyConfig
+            {
+                Name = proxyName,
+                Type = FrpRuleTypes.Stcp,
+                Role = FrpRuleTypes.ProxyRole,
+                LocalIP = localIP,
+                LocalPort = localPort.ToString(),
+                SecretKey = secretKey
+            };
+
+            return true;
+        }
+
+        if (!TryReadPort(ConfigurationView.RemotePort, "服务器端口", out var remotePort))
+        {
+            return false;
+        }
+
+        rule = new FrpProxyConfig
         {
             Name = proxyName,
             Type = proxyType,
+            Role = FrpRuleTypes.ProxyRole,
             LocalIP = localIP,
             LocalPort = localPort.ToString(),
             RemotePort = remotePort.ToString()
-        });
+        };
 
-        ConfigurationView.ResetNewProxyForm();
-        ConfigStatusTextBlock.Text = "已添加转发规则，点击“保存配置”后写入 frpc.toml。";
-        UpdateOverview();
+        return true;
     }
 
-    private void DeleteSelectedProxyButton_Click(object sender, RoutedEventArgs e) // 删除表格里当前选中的端口转发
+    private void ShowStcpNotSupportedMessage() // 版本不支持 STCP 时给出明确提示
+    {
+        MessageBox.Show(
+            $"当前 frpc {_frpcCapabilities.VersionText} 不支持 STCP 配置。\n\n" +
+            "STCP 本身需要 frpc 0.22.0 及以上版本；本客户端通过 TOML 配置，实际需要 0.52.0 及以上版本。\n" +
+            "请先到“下载”页安装新版 frpc，然后回到配置页点击“检测版本”。",
+            "STCP 不可用",
+            MessageBoxButton.OK,
+            MessageBoxImage.Warning);
+    }
+
+    private void DeleteSelectedProxyButton_Click(object sender, RoutedEventArgs e) // 删除表格里当前选中的转发规则
     {
         if (ConfigurationView.SelectedProxy is not FrpProxyConfig selectedProxy)
         {
             MessageBox.Show("请先在表格中选择要删除的转发规则。", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
+        }
+
+        if (ReferenceEquals(selectedProxy, _editingProxy))
+        {
+            FinishEditingProxy();
         }
 
         _proxies.Remove(selectedProxy);
@@ -268,6 +386,67 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
             ConfigStatusTextBlock.Text = "刷新配置失败。";
             AppendLog($"刷新配置失败：{ex.Message}");
             MessageBox.Show($"刷新配置失败：{ex.Message}", "刷新失败", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private async void CopyServerIpButton_Click(object sender, RoutedEventArgs e) // 复制当前配置里的服务器 IP
+    {
+        var serverAddr = ConfigurationView.ServerAddr.Trim();
+
+        if (serverAddr.Length == 0)
+        {
+            MessageBox.Show("服务器 IP 为空，无法复制。", "复制服务器 IP", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        await CopyTextToClipboardAsync(serverAddr, $"已复制服务器 IP：{serverAddr}", "复制服务器 IP");
+    }
+
+    private async void OverviewView_CopyProxyServerEndpointRequested(object? sender, Views.OverviewProxyCopyRequestedEventArgs e) // 复制卡片对应的访问地址
+    {
+        var proxy = e.Proxy;
+        var serverAddr = ConfigurationView.ServerAddr.Trim();
+
+        if (proxy.IsStcpProxy)
+        {
+            MessageBox.Show(
+                "STCP 服务端没有固定的对外访问地址。\n\n请在需要访问的一端添加一条“stcp 访问端”规则，填写服务器名称、密钥和监听端口，之后访问监听地址 + 监听端口即可。",
+                "复制访问地址",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        var endpoint = proxy.GetCopyEndpointText(serverAddr);
+
+        if (endpoint.Length == 0)
+        {
+            MessageBox.Show(
+                proxy.IsStcpVisitor ? "STCP 访问端的监听端口为空，无法复制。" : "服务器 IP 为空，无法复制。",
+                "复制访问地址",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        await CopyTextToClipboardAsync(endpoint, $"已复制访问地址：{endpoint}", "复制访问地址");
+    }
+
+    private async Task CopyTextToClipboardAsync(string text, string successMessage, string actionName) // 统一处理复制文本、状态提示和错误提示
+    {
+        try
+        {
+            await NativeClipboard.SetTextWithRetryAsync(
+                text,
+                ClipboardCopyRetryCount,
+                ClipboardCopyRetryDelayMilliseconds);
+            ConfigStatusTextBlock.Text = successMessage;
+            AppendLog(successMessage);
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"{actionName}失败：{ex.Message}");
+            MessageBox.Show($"{actionName}失败：{ex.Message}", "复制失败", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 
@@ -389,8 +568,6 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
 
     private bool SaveConfigFromForm() // 把界面里的配置重新生成并写入 frpc.toml
     {
-        ConfigurationView.CommitProxyGridEdits(); // 保存前提交正在编辑的表格内容
-
         if (!TryBuildConfigText(out var configText))
         {
             return false;
@@ -406,7 +583,19 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
             }
 
             File.WriteAllText(_frpcConfigPath, configText, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-            ConfigStatusTextBlock.Text = $"配置“{_activeProfile.Name}”已保存：{_frpcConfigPath}";
+
+            var unsupportedStcpCount = _proxies.Count(rule => rule.IsStcp);
+
+            if (unsupportedStcpCount > 0 && !_frpcCapabilities.SupportsStcp)
+            {
+                ConfigStatusTextBlock.Text = $"配置已保存，但当前 frpc {_frpcCapabilities.VersionText} 不支持 STCP，启动前请先更新 frpc。";
+                AppendLog($"配置中仍有 {unsupportedStcpCount} 条 STCP 规则，当前 frpc 版本不支持，启动会被拦截。");
+            }
+            else
+            {
+                ConfigStatusTextBlock.Text = $"配置“{_activeProfile.Name}”已保存：{_frpcConfigPath}";
+            }
+
             AppendLog($"配置“{_activeProfile.Name}”已保存。");
             UpdateOverview();
 
@@ -646,14 +835,36 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
 
             if (proxy.Name.Length == 0)
             {
-                MessageBox.Show("端口转发名称不能为空。", "配置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageBox.Show("转发规则名称不能为空。", "配置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return false;
             }
 
-            if (proxy.Type is not "tcp" and not "udp")
+            if (proxy.Type is not (FrpRuleTypes.Tcp or FrpRuleTypes.Udp or FrpRuleTypes.Stcp))
             {
-                MessageBox.Show($"转发“{proxy.Name}”的类型只能是 tcp 或 udp。", "配置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageBox.Show($"转发“{proxy.Name}”的类型只能是 tcp、udp 或 stcp。", "配置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return false;
+            }
+
+            if (proxy.IsStcpVisitor)
+            {
+                if (proxy.ServerName.Length == 0)
+                {
+                    MessageBox.Show($"STCP 访问端“{proxy.Name}”的服务器名称不能为空。", "配置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return false;
+                }
+
+                if (proxy.SecretKey.Length == 0)
+                {
+                    MessageBox.Show($"STCP 访问端“{proxy.Name}”的密钥不能为空。", "配置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return false;
+                }
+
+                if (!TryReadPort(proxy.BindPort, $"STCP 访问端“{proxy.Name}”的监听端口", out _))
+                {
+                    return false;
+                }
+
+                continue;
             }
 
             if (proxy.LocalIP.Length == 0)
@@ -662,8 +873,23 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
                 return false;
             }
 
-            if (!TryReadPort(proxy.LocalPort, $"转发“{proxy.Name}”的本地端口", out _) ||
-                !TryReadPort(proxy.RemotePort, $"转发“{proxy.Name}”的远程端口", out _))
+            if (!TryReadPort(proxy.LocalPort, $"转发“{proxy.Name}”的本地端口", out _))
+            {
+                return false;
+            }
+
+            if (proxy.IsStcpProxy)
+            {
+                if (proxy.SecretKey.Length == 0)
+                {
+                    MessageBox.Show($"STCP 服务端“{proxy.Name}”的密钥不能为空。", "配置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return false;
+                }
+
+                continue;
+            }
+
+            if (!TryReadPort(proxy.RemotePort, $"转发“{proxy.Name}”的服务器端口", out _))
             {
                 return false;
             }
@@ -671,28 +897,19 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
 
         if (_proxies.GroupBy(proxy => proxy.Name, StringComparer.OrdinalIgnoreCase).Any(group => group.Count() > 1))
         {
-            MessageBox.Show("端口转发名称不能重复。", "配置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+            MessageBox.Show("转发规则名称不能重复。", "配置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
 
-        var builder = new StringBuilder();
-        builder.AppendLine($"serverAddr = \"{EscapeTomlString(serverAddr)}\"");
-        builder.AppendLine($"serverPort = {serverPort}");
-        builder.AppendLine($"auth.token = \"{EscapeTomlString(authToken)}\"");
-        builder.AppendLine();
-
-        foreach (var proxy in _proxies)
+        var document = new FrpConfigDocument
         {
-            builder.AppendLine("[[proxies]]");
-            builder.AppendLine($"name = \"{EscapeTomlString(proxy.Name)}\"");
-            builder.AppendLine($"type = \"{EscapeTomlString(proxy.Type)}\"");
-            builder.AppendLine($"localIP = \"{EscapeTomlString(proxy.LocalIP)}\"");
-            builder.AppendLine($"localPort = {proxy.LocalPort}");
-            builder.AppendLine($"remotePort = {proxy.RemotePort}");
-            builder.AppendLine();
-        }
+            ServerAddr = serverAddr,
+            ServerPort = serverPort.ToString(),
+            AuthToken = authToken
+        };
 
-        configText = builder.ToString();
+        document.Rules.AddRange(_proxies);
+        configText = FrpConfigSerializer.Build(document);
         return true;
     }
 
@@ -718,6 +935,25 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
         if (!File.Exists(_frpcExePath)) // 启动前先确认 frpc.exe 是否真的存在
         {
             AppendLog($"找不到 frpc.exe：{_frpcExePath}");
+            return;
+        }
+
+        if (_frpcCapabilities.HasKnownVersion && !_frpcCapabilities.SupportsTomlConfig) // 老版本 frpc 读不了 TOML 配置
+        {
+            MessageBox.Show(
+                $"当前 frpc {_frpcCapabilities.VersionText} 低于 0.52.0，无法读取本客户端生成的 TOML 配置。\n\n" +
+                "请到“下载”页安装 0.52.0 及以上版本的 frpc，然后点击配置页的“检测版本”。",
+                "frpc 版本过低",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            AppendLog($"已取消启动：frpc {_frpcCapabilities.VersionText} 不支持 TOML 配置。");
+            return;
+        }
+
+        if (_proxies.Any(rule => rule.IsStcp) && !_frpcCapabilities.SupportsStcp) // STCP 需要更新的 frpc
+        {
+            ShowStcpNotSupportedMessage();
+            AppendLog("已取消启动：当前 frpc 不支持配置中的 STCP 规则。");
             return;
         }
 
@@ -810,8 +1046,17 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
             return;
         }
 
-        if (MainTabControl.SelectedItem is TabItem selectedTab &&
-            ReferenceEquals(selectedTab.Content, DownloadView))
+        if (MainTabControl.SelectedItem is not TabItem selectedTab)
+        {
+            return;
+        }
+
+        if (ReferenceEquals(selectedTab.Content, OverviewView))
+        {
+            UpdateOverview();
+        }
+
+        if (ReferenceEquals(selectedTab.Content, DownloadView))
         {
             await EnsureFrpReleasesLoadedAsync();
         }
@@ -873,12 +1118,13 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
 
                 await DownloadAndReplaceFrpcAsync(release, _frpcExePath, progress);
 
-                var installedVersion = GetFrpcVersion(_frpcExePath);
-                UpdateFrpcVersionDisplay(installedVersion);
-                ConfigStatusTextBlock.Text = $"frpc 已更新为 {installedVersion}。";
+                _frpcCapabilities = FrpClientCapabilities.Detect(_frpcExePath); // 安装完成后重新检测版本和 STCP 支持情况
+                UpdateFrpcVersionDisplay(_frpcCapabilities.VersionText);
+                ApplyCapabilityState();
+                ConfigStatusTextBlock.Text = $"frpc 已更新为 {_frpcCapabilities.VersionText}。";
                 DownloadView.SetDownloadProgress(100, "安装完成");
-                DownloadView.SetStatus($"frpc 已更新为 {installedVersion}");
-                AppendLog($"frpc 已更新为 {installedVersion}。");
+                DownloadView.SetStatus($"frpc 已更新为 {_frpcCapabilities.VersionText}");
+                AppendLog($"frpc 已更新为 {_frpcCapabilities.VersionText}。");
             }
             catch (Exception ex)
             {
@@ -999,6 +1245,8 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
         OverviewServerTextBlock.Text = string.IsNullOrWhiteSpace(serverAddr)
             ? "-"
             : $"{serverAddr}:{serverPort}";
+        OverviewServerTextBlock.ToolTip = OverviewServerTextBlock.Text;
+        CopyServerIpButton.IsEnabled = serverAddr.Length > 0;
 
         OverviewView.UpdateProxyCount(_proxies.Count);
         OverviewView.RefreshProxyCards(); // 保存或编辑后刷新首页卡片列表
@@ -1032,7 +1280,28 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
     private void UpdateFrpcVersionDisplay(string version) // 同步所有展示 frpc 版本号的位置
     {
         FrpcVersionTextBlock.Text = $"frpc {version}";
+        FrpcVersionTextBlock.ToolTip = _frpcCapabilities.DetailText;
         DownloadView.SetCurrentVersion(version);
+    }
+
+    private void ApplyCapabilityState() // 把版本检测结果同步到配置页状态标签和类型下拉框
+    {
+        ConfigurationView.SetCapability(_frpcCapabilities);
+        AppendLog($"版本检测：frpc {_frpcCapabilities.VersionText}，STCP {(_frpcCapabilities.SupportsStcp ? "可用" : "不可用")}。");
+    }
+
+    private void DetectVersionButton_Click(object sender, RoutedEventArgs e) // 配置页点击“检测版本”
+    {
+        _frpcCapabilities = FrpClientCapabilities.Detect(_frpcExePath);
+        UpdateFrpcVersionDisplay(_frpcCapabilities.VersionText);
+        ApplyCapabilityState();
+        ConfigStatusTextBlock.Text = _frpcCapabilities.StatusDetail;
+        AppendLog(_frpcCapabilities.StatusDetail);
+
+        if (!_frpcCapabilities.SupportsStcp && _proxies.Any(rule => rule.IsStcp))
+        {
+            AppendLog("配置中的 STCP 规则在当前 frpc 版本下无法启动。");
+        }
     }
 
     private async Task LoadFrpReleasesToDownloadViewAsync() // 从 GitHub 读取可下载版本，并交给下载页显示
@@ -1066,63 +1335,6 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
             DownloadView.SetBusy(false);
             DownloadView.SetServiceRunning(_isRunning);
         }
-    }
-
-    private static string UnquoteTomlValue(string value) // 把 TOML 里的 "abc" 或 123 转成界面要显示的 abc / 123
-    {
-        var trimmedValue = RemoveInlineComment(value).Trim();
-
-        if (trimmedValue.Length >= 2 && trimmedValue.StartsWith('"') && trimmedValue.EndsWith('"'))
-        {
-            trimmedValue = trimmedValue[1..^1];
-        }
-
-        return trimmedValue
-            .Replace("\\\"", "\"", StringComparison.Ordinal)
-            .Replace("\\\\", "\\", StringComparison.Ordinal);
-    }
-
-    private static string RemoveInlineComment(string value) // 去掉 TOML 行尾注释，但保留字符串里的 # 号
-    {
-        var isInsideString = false;
-        var isEscaped = false;
-
-        for (var index = 0; index < value.Length; index++)
-        {
-            var currentChar = value[index];
-
-            if (isEscaped)
-            {
-                isEscaped = false;
-                continue;
-            }
-
-            if (currentChar == '\\' && isInsideString)
-            {
-                isEscaped = true;
-                continue;
-            }
-
-            if (currentChar == '"')
-            {
-                isInsideString = !isInsideString;
-                continue;
-            }
-
-            if (currentChar == '#' && !isInsideString)
-            {
-                return value[..index];
-            }
-        }
-
-        return value;
-    }
-
-    private static string EscapeTomlString(string value) // 写入 TOML 前转义反斜杠和双引号
-    {
-        return value
-            .Replace("\\", "\\\\", StringComparison.Ordinal)
-            .Replace("\"", "\\\"", StringComparison.Ordinal);
     }
 
     private static async Task<IReadOnlyList<FrpReleaseInfo>> LoadFrpReleasesAsync() // 读取 GitHub Releases 中所有可下载的 frp 客户端包
@@ -1438,47 +1650,7 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
         return null;
     }
 
-    private static string GetFrpcVersion(string frpcExePath) // 调用 frpc.exe --version，读取当前客户端内置的 frp 版本
-    {
-        if (!File.Exists(frpcExePath))
-        {
-            return "版本未知";
-        }
-
-        try
-        {
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = frpcExePath,
-                Arguments = "--version",
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
-
-            using var process = Process.Start(startInfo);
-
-            if (process is null)
-            {
-                return "版本未知";
-            }
-
-            if (!process.WaitForExit(2000))
-            {
-                process.Kill(entireProcessTree: true);
-                return "版本未知";
-            }
-
-            var version = process.StandardOutput.ReadToEnd().Trim();
-
-            return version.Length == 0 ? "版本未知" : version;
-        }
-        catch
-        {
-            return "版本未知";
-        }
-    }
+    private static string GetFrpcVersion(string frpcExePath) => FrpClientCapabilities.ReadFrpcVersion(frpcExePath);
 
     private static HttpClient CreateFrpDownloadHttpClient() // GitHub 建议请求带 User-Agent，这里统一设置
     {
@@ -1562,26 +1734,3 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
     }
 }
 
-public class FrpProxyConfig // 表格里的每一行，对应 frpc.toml 里的一个 [[proxies]]
-{
-    public string Name { get; set; } = "";
-
-    public string Type { get; set; } = "tcp";
-
-    public string LocalIP { get; set; } = "127.0.0.1";
-
-    public string LocalPort { get; set; } = "";
-
-    public string RemotePort { get; set; } = "";
-
-    public string LocalEndpoint => $"{LocalIP}:{LocalPort}";
-
-    public void TrimAll() // 保存前清理表格中用户可能输入的前后空格
-    {
-        Name = Name.Trim();
-        Type = Type.Trim().ToLowerInvariant();
-        LocalIP = LocalIP.Trim();
-        LocalPort = LocalPort.Trim();
-        RemotePort = RemotePort.Trim();
-    }
-}

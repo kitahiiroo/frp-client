@@ -8,8 +8,11 @@
 
 - 图形化管理 frpc 配置文件
 - 添加、删除和查看端口转发规则
-- 修改服务器 IP、服务器端口和认证密钥
 - 支持 TCP / UDP 转发规则
+- 支持 STCP：可添加 stcp 服务端（`[[proxies]]`）和 stcp 访问端（`[[visitors]]`，含监听端口 bindPort）
+- 支持编辑选中的转发规则
+- 版本检测：检测当前 frpc 是否支持 STCP，不支持时禁用相关选项并阻止启动
+- 修改服务器 IP、服务器端口和认证密钥
 - 启动和停止 frpc 服务
 - 查看 frpc 运行日志
 - 显示当前本地 frpc 版本
@@ -42,6 +45,10 @@ frp-client/
 │           ├── Assets/           # 图标资源
 │           ├── Resources/        # 全局样式
 │           ├── Views/            # 拆分后的界面文件
+│           ├── FrpVersion.cs      # frp 版本号解析与比较
+│           ├── FrpFeatureSupport.cs # 版本检测、STCP 支持判断
+│           ├── FrpConfigSerializer.cs # frpc.toml 读写
+│           ├── FrpProxyConfig.cs  # 转发规则模型（tcp/udp/stcp）
 │           ├── MainWindow.xaml   # 主窗口界面
 │           └── MainWindow.xaml.cs # 主窗口逻辑
 └── README.md
@@ -114,6 +121,53 @@ FrpClient.App.exe
 
 `frp/frpc.exe` 是所有配置共用的 frpc 程序；`profiles/*/frpc.toml` 是每个配置方案自己的配置文件。
 
+## 使用 STCP
+
+STCP（Secret TCP）需要“服务端”和“访问端”两端配合，两端的密钥必须相同：
+
+1. 在提供服务的机器上添加类型为 `stcp 服务端` 的规则，填写名称、密钥、本地 IP 和本地端口。
+2. 在需要访问的机器上添加类型为 `stcp 访问端` 的规则，填写：
+   - 服务器名称：服务端那条 stcp 规则的 `name`（不是服务器 IP），两端名称必须对应
+   - 密钥：与服务端一致
+   - 监听地址 / 监听端口（bindPort）：访问端在本机监听的地址和端口
+3. 连接访问端的 `监听地址:监听端口`，即可访问到服务端的本地服务。
+
+生成的配置大致如下：
+
+```toml
+# 服务端
+[[proxies]]
+name = "secret_web"
+type = "stcp"
+secretKey = "abc123"
+localIP = "127.0.0.1"
+localPort = 8080
+
+# 访问端
+[[visitors]]
+name = "secret_web_visitor"
+type = "stcp"
+serverName = "secret_web"
+secretKey = "abc123"
+bindAddr = "127.0.0.1"
+bindPort = 9000
+```
+
+## 版本检测
+
+配置页“已有转发规则”标题旁边会显示当前 frpc 的 STCP 支持状态（例如“STCP 可用 · frpc 0.62.1”），鼠标悬停可以看到完整检测结果；点击“检测版本”可以重新检测。检测分两步：
+
+- 比较 `frpc --version` 输出：STCP 需要 frpc 0.22.0 及以上；本客户端使用 TOML 配置，实际需要 0.52.0 及以上。
+- 在 0.52.0 及以上版本上，再调用 `frpc verify` 实际校验一段 STCP 配置，避免版本号判断过时导致误判。
+
+当版本不支持时：
+
+- 配置页的 STCP 选项会变灰，无法新增 STCP 规则；
+- 启动包含 STCP 规则的配置会被拦截，并提示先升级 frpc；
+- frpc 低于 0.52.0 时，启动任何规则都会被拦截（旧版本无法读取 TOML 配置）。
+
+升级 frpc 后，回到配置页点击“检测版本”即可恢复。
+
 ## 下载 frpc 版本
 
 客户端会从 fatedier/frp 的 GitHub Releases 读取可下载包。
@@ -135,6 +189,7 @@ FrpClient.App.exe
 - 启动 frpc 前，请确认服务器地址、端口、认证密钥和转发规则配置正确。
 - 更新 frpc 前需要先停止正在运行的 frpc 服务。
 - 发布时不要只复制单独的 `FrpClient.App.exe`，需要保留旁边的 `frp` 文件夹。
+- 转发规则支持 tcp / udp / stcp；访问端目前只支持 stcp 类型，如果 `frpc.toml` 里存在 xtcp / sudp 的 `[[visitors]]`，保存时会被忽略，并在日志中给出提示。
 
 ## 相关项目
 
