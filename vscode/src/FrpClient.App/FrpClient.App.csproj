@@ -15,6 +15,9 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- 防火墙脚本随程序集内嵌，避免从用户数据目录加载可被替换的提权脚本。 -->
+    <EmbeddedResource Include="Firewall\ConfigureFrpcFirewall.ps1"
+                      LogicalName="FrpClient.App.ConfigureFrpcFirewall.ps1" />
     <None Remove="Assets\frpclient.ico" />
     <Resource Include="Assets\frpclient.ico" />
     <None Include="..\..\..\frp_0.62.1_windows_amd64\frpc.exe"

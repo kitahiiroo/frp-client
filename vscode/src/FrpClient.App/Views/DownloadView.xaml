@@ -15,6 +15,7 @@
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
                 <Grid>
@@ -93,6 +94,24 @@
                                FontSize="12"
                                FontWeight="SemiBold"
                                VerticalAlignment="Center" />
+                </Grid>
+                <Grid Grid.Row="2" Margin="0,16,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Name="FirewallStatusTextBlock"
+                               Text="Windows 提示防火墙阻止部分功能时，可在此允许 frpc 通过指定网络。"
+                               Margin="0,0,16,0"
+                               TextWrapping="Wrap"
+                               VerticalAlignment="Center"
+                               Foreground="{StaticResource MutedBrush}"
+                               FontSize="12" />
+                    <Button Name="ConfigureFirewallButton"
+                            Grid.Column="1"
+                            Width="128"
+                            Content="设置防火墙"
+                            Click="ConfigureFirewallButton_Click" />
                 </Grid>
             </Grid>
         </Border>

@@ -61,6 +61,7 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
         ConfigurationView.DetectVersionRequested += DetectVersionButton_Click;
         DownloadView.RefreshRequested += DownloadView_RefreshRequested;
         DownloadView.DownloadRequested += DownloadView_DownloadRequested;
+        DownloadView.FirewallRequested += DownloadView_FirewallRequested;
 
         AppendLog("客户端已启动。"); // 往日志框追加一行文字
         AppendLog($"frpc 版本：{_frpcCapabilities.VersionText}");

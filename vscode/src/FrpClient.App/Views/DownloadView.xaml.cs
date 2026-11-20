@@ -13,6 +13,7 @@ public partial class DownloadView : UserControl
     private readonly ObservableCollection<string> _architectureOptions = [];
     private bool _isBusy;
     private bool _isServiceRunning;
+    private bool _isConfiguringFirewall;
     private double? _downloadProgressPercent;
 
     public DownloadView()
@@ -27,6 +28,9 @@ public partial class DownloadView : UserControl
     public event EventHandler? RefreshRequested;
 
     public event EventHandler<FrpReleaseDownloadRequestedEventArgs>? DownloadRequested;
+
+    /// <summary>请求为当前 frpc 配置 Windows 防火墙访问权限。</summary>
+    public event EventHandler? FirewallRequested;
 
     public void SetCurrentVersion(string version)
     {
@@ -74,6 +78,26 @@ public partial class DownloadView : UserControl
     {
         _isServiceRunning = isServiceRunning;
         UpdateEnabledState();
+    }
+
+    /// <summary>防火墙操作期间禁止重复点击，且不改变 frpc 当前运行状态。</summary>
+    public void SetFirewallBusy(bool isBusy)
+    {
+        _isConfiguringFirewall = isBusy;
+        ConfigureFirewallButton.Content = isBusy ? "正在设置…" : "设置防火墙";
+        UpdateEnabledState();
+    }
+
+    /// <summary>单独显示防火墙操作结果，避免覆盖版本列表和下载进度。</summary>
+    public void SetFirewallStatus(string status)
+    {
+        FirewallStatusTextBlock.Text = status;
+    }
+
+    /// <summary>由窗口统一处理网络选择及管理员授权。</summary>
+    private void ConfigureFirewallButton_Click(object sender, RoutedEventArgs e)
+    {
+        FirewallRequested?.Invoke(this, EventArgs.Empty);
     }
 
     private void RefreshReleasesButton_Click(object sender, RoutedEventArgs e)
@@ -174,10 +198,12 @@ public partial class DownloadView : UserControl
 
     private void UpdateEnabledState()
     {
-        RefreshReleasesButton.IsEnabled = !_isBusy;
-        SearchReleaseTextBox.IsEnabled = !_isBusy;
-        ArchitectureFilterComboBox.IsEnabled = !_isBusy;
-        ReleaseDataGrid.IsEnabled = !_isBusy && !_isServiceRunning;
+        var isBusy = _isBusy || _isConfiguringFirewall;
+        RefreshReleasesButton.IsEnabled = !isBusy;
+        SearchReleaseTextBox.IsEnabled = !isBusy;
+        ArchitectureFilterComboBox.IsEnabled = !isBusy;
+        ReleaseDataGrid.IsEnabled = !isBusy && !_isServiceRunning;
+        ConfigureFirewallButton.IsEnabled = !isBusy;
     }
 
     private void UpdateDownloadProgressFill()
