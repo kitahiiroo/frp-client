@@ -926,6 +926,16 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
 
     private void StartButton_Click(object sender, RoutedEventArgs e) // 点击“启动 frpc”按钮时执行
     {
+        StartFrpcProcess();
+    }
+
+    private void StartFrpcProcess() // 窗口和托盘共用的启动流程，包含版本检查、配置保存和日志监听
+    {
+        if (_isExiting || _isDownloadingFrpc) // 退出或下载时不能启动，避免运行正在替换的 frpc
+        {
+            return;
+        }
+
         if (_frpcProcess is not null && !_frpcProcess.HasExited) // 如果进程对象存在，并且还没有退出
         {
             AppendLog("frpc 已经在运行。");
@@ -980,35 +990,52 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
             RedirectStandardError = true // 读取 frpc 的错误输出
         };
 
-        _frpcProcess = new Process // 创建进程对象，但此时还没有真正启动
+        var process = new Process // 创建进程对象，但此时还没有真正启动
         {
             StartInfo = startInfo, // 把启动参数交给进程对象
             EnableRaisingEvents = true // 允许监听 Exited 事件，也就是进程退出事件
         };
 
-        _frpcProcess.OutputDataReceived += (_, args) => AppendLog(args.Data); // frpc 有普通输出时，写入日志框
-        _frpcProcess.ErrorDataReceived += (_, args) => AppendLog(args.Data); // frpc 有错误输出时，也写入日志框
-        _frpcProcess.Exited += (_, _) => // frpc 进程退出时执行
+        _frpcProcess?.Dispose(); // 释放上一次已退出的进程句柄
+        _frpcProcess = process;
+        process.OutputDataReceived += (_, args) => AppendLog(args.Data); // frpc 有普通输出时，写入日志框
+        process.ErrorDataReceived += (_, args) => AppendLog(args.Data); // frpc 有错误输出时，也写入日志框
+        process.Exited += (_, _) => // frpc 进程退出时执行
         {
-            Dispatcher.Invoke(() => // 子线程不能直接改界面，必须交给 WPF 的 UI 线程执行
+            if (_isExiting || Dispatcher.HasShutdownStarted)
             {
-                SetRunningState(false);
-                AppendLog("frpc 已退出。");
-            });
+                return;
+            }
+
+            Dispatcher.BeginInvoke(new Action(() => // 不阻塞进程退出线程，避免退出客户端时相互等待
+            {
+                if (!_isExiting && ReferenceEquals(_frpcProcess, process)) // 忽略上一次进程延迟到达的退出通知
+                {
+                    SetRunningState(false);
+                    AppendLog("frpc 已退出。");
+                }
+            }));
         };
 
+        var processStarted = false;
         try
         {
-            _frpcProcess.Start(); // 真正启动 frpc.exe
-            _frpcProcess.BeginOutputReadLine(); // 开始异步读取普通输出
-            _frpcProcess.BeginErrorReadLine(); // 开始异步读取错误输出
+            processStarted = process.Start(); // 真正启动 frpc.exe
+            process.BeginOutputReadLine(); // 开始异步读取普通输出
+            process.BeginErrorReadLine(); // 开始异步读取错误输出
 
             SetRunningState(true); // 更新按钮和状态文字
             AppendLog("frpc 已启动。");
         }
         catch (Exception ex) // 如果启动过程出错，比如权限不足、文件损坏，会进入这里
         {
-            SetRunningState(false);
+            if (!processStarted)
+            {
+                _frpcProcess = null;
+                process.Dispose();
+            }
+
+            SetRunningState(processStarted && !process.HasExited); // 即使日志监听失败，也保留对实际运行进程的控制
             AppendLog($"启动 frpc 失败：{ex.Message}");
         }
     }
@@ -1186,13 +1213,7 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
         }
     }
 
-    protected override void OnClosed(EventArgs e) // 窗口关闭时，WPF 会调用这个函数
-    {
-        StopFrpcProcess(); // 关闭客户端窗口时顺便停止 frpc，避免后台残留进程
-        base.OnClosed(e); // 调用父类 Window 原本的关闭逻辑
-    }
-
-    private void StopFrpcProcess() // 停止 frpc 的公共逻辑，按钮关闭和窗口关闭都会用到
+    private void StopFrpcProcess() // 窗口、托盘停止服务，以及彻底退出客户端共用的停止逻辑
     {
         if (_frpcProcess is null || _frpcProcess.HasExited) // 没有进程，或者进程已经退出
         {
@@ -1213,15 +1234,15 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
         }
         finally // 无论 try 成功还是 catch 捕获异常，最后都会执行
         {
-            SetRunningState(false);
+            SetRunningState(_frpcProcess is { HasExited: false }); // 停止失败时仍显示实际运行状态
         }
     }
 
     private void SetRunningState(bool isRunning) // 根据运行状态更新界面
     {
         _isRunning = isRunning;
-        StartButton.IsEnabled = !isRunning; // 运行中不能重复点击启动
-        StopButton.IsEnabled = isRunning; // 只有运行中才允许停止
+        StartButton.IsEnabled = !isRunning && !_isDownloadingFrpc; // 运行中或下载中不能启动
+        StopButton.IsEnabled = isRunning && !_isDownloadingFrpc; // 只有运行中且未下载时允许停止
         DownloadView.SetServiceRunning(isRunning); // 运行中不能替换 frpc.exe
         StatusTextBlock.Text = isRunning ? "运行中" : "未运行"; // 三元表达式：条件 ? 成立时的值 : 不成立时的值
         StatusTextBlock.Foreground = isRunning // 修改状态文字颜色
@@ -1250,18 +1271,19 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
 
         OverviewView.UpdateProxyCount(_proxies.Count);
         OverviewView.RefreshProxyCards(); // 保存或编辑后刷新首页卡片列表
+        UpdateTrayState();
     }
 
     private void AppendLog(string? message) // 向日志文本框追加一行
     {
-        if (string.IsNullOrWhiteSpace(message)) // 忽略 null、空字符串、全是空格的内容
+        if (_isExiting || Dispatcher.HasShutdownStarted || string.IsNullOrWhiteSpace(message)) // 退出时不再向即将关闭的界面投递日志
         {
             return;
         }
 
         if (!Dispatcher.CheckAccess()) // 判断当前代码是否运行在 WPF 的 UI 线程
         {
-            Dispatcher.Invoke(() => AppendLog(message)); // 如果不是 UI 线程，就切回 UI 线程再改界面
+            Dispatcher.BeginInvoke(new Action(() => AppendLog(message))); // 异步切回 UI 线程，避免停止进程时互相等待
             return;
         }
 
@@ -1275,6 +1297,7 @@ public partial class MainWindow : Window // partial 表示这个类还有一部�
         StartButton.IsEnabled = !isDownloading && !_isRunning;
         StopButton.IsEnabled = !isDownloading && _isRunning;
         UpdateProfileControlsState();
+        UpdateTrayState();
     }
 
     private void UpdateFrpcVersionDisplay(string version) // 同步所有展示 frpc 版本号的位置

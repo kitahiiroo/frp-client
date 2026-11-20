@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 64 64">
+  <title>FRP 双向端口转发</title>
+  <desc>以双向箭头表现网络转发，使用高对比色块保证托盘尺寸下的辨识度。</desc>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#1469FF" />
+  <rect x="11" y="18" width="31" height="8" rx="4" fill="#FFFFFF" />
+  <polygon points="37,12 52,22 37,32" fill="#FFFFFF" />
+  <rect x="22" y="38" width="31" height="8" rx="4" fill="#FFFFFF" />
+  <polygon points="27,32 12,42 27,52" fill="#FFFFFF" />
+</svg>

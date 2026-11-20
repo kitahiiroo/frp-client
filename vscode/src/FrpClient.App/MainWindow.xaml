@@ -63,6 +63,13 @@
                             Margin="0,0,8,0"
                             Content="打开目录"
                             Click="OpenFrpFolderButton_Click" />
+                    <Button Name="RunInBackgroundButton"
+                            Width="112"
+                            Margin="0,0,8,0"
+                            Content="后台运行"
+                            IsEnabled="False"
+                            ToolTip="隐藏到右下角托盘，服务继续运行；右键托盘图标可停止服务或退出程序。"
+                            Click="RunInBackgroundButton_Click" />
                     <Button Name="StartButton"
                             Width="112"
                             Margin="0,0,8,0"
