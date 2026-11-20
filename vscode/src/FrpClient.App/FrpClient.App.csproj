@@ -9,6 +9,11 @@
     <ApplicationIcon>Assets\frpclient.ico</ApplicationIcon>
   </PropertyGroup>
 
+  <!-- 兼容原有单文件发布命令，压缩内嵌程序集以减小免安装版体积。 -->
+  <PropertyGroup Condition="'$(PublishSingleFile)' == 'true'">
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+  </PropertyGroup>
+
   <ItemGroup>
     <None Remove="Assets\frpclient.ico" />
     <Resource Include="Assets\frpclient.ico" />
